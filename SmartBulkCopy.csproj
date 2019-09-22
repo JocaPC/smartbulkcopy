@@ -21,12 +21,12 @@
   </PropertyGroup>
   
   <ItemGroup>
-    <PackageReference Include="Dapper" Version="1.60.9" />
+    <PackageReference Include="Dapper" Version="2.0.4" />
     <PackageReference Include="Microsoft.Extensions.Configuration" Version="2.2.0" />
     <PackageReference Include="Microsoft.Extensions.Configuration.CommandLine" Version="2.2.0" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="2.2.0" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="2.2.0" />
-    <PackageReference Include="NLog.Extensions.Logging" Version="1.5.2" />
+    <PackageReference Include="NLog.Extensions.Logging" Version="1.5.4" />
     <PackageReference Include="System.Data.SqlClient" Version="4.6.1" />
   </ItemGroup>
 
@@ -34,6 +34,16 @@
     <Content Include="*.config">      
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Remove="smartbulkcopy.config" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="smartbulkcopy.config">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
 </Project>

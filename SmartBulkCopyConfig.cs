@@ -22,9 +22,43 @@ namespace SmartBulkCopy
 
     class SmartBulkCopyConfiguration 
     {
+        public enum CopyType { BulkCopy, ServerSidePush, ServerSidePull }
+        internal CopyType type;
+
+        public void SetType (string value) {
+            switch (value.ToLower()) {
+                case "serverside":
+                case "serversidepush":
+                    this.type = CopyType.ServerSidePush;
+                    break;
+                case "serversidepull":
+                    this.type = CopyType.ServerSidePull;
+                    break;
+                case "bulkcopy":
+                case "bulk_copy":
+                default:
+                    this.type = CopyType.BulkCopy;
+                    break;                
+            }
+        }
+
         public string SourceConnectionString;
-        
-        public string DestinationConnectionString;         
+
+        public string SourceDatabase { get; private set; }
+
+        public string DestinationConnectionString;
+
+        string _destinationDatabaseName;
+        public string DestinationDatabase
+        {   get => _destinationDatabaseName;
+            private set {
+                if (string.IsNullOrWhiteSpace(value) && type == CopyType.ServerSidePush)
+                    throw new InvalidOperationException("Destination database name must be set in ServerSidePush mode");
+                else _destinationDatabaseName = value;
+             }
+        }
+
+        public string LinkedServer { get; private set; }
 
         public List<string> TablesToCopy = new List<string>();
 
@@ -80,10 +114,13 @@ namespace SmartBulkCopy
                 .AddJsonFile(configFile, optional: false, reloadOnChange: false)
                 .Build();                 
 
-            var sbcc = new SmartBulkCopyConfiguration();                
+            var sbcc = new SmartBulkCopyConfiguration();
 
+            sbcc.SetType(config?["type"]??"bulkcopy");
             sbcc.SourceConnectionString = config["source:connection-string"];
             sbcc.DestinationConnectionString = config["destination:connection-string"];
+            sbcc.DestinationDatabase = config["destination:destination-database"];
+            sbcc.LinkedServer = config["destination:linked-server"] ?? "DESTINATION";
             sbcc.BatchSize = int.Parse(config?["options:batch-size"] ?? sbcc.BatchSize.ToString());
             sbcc.LogicalPartitions = int.Parse(config?["options:logical-partitions"] ?? sbcc.LogicalPartitions.ToString());
             sbcc.MaxParallelTasks = int.Parse(config?["options:tasks"] ?? sbcc.MaxParallelTasks.ToString());

@@ -75,6 +75,18 @@ namespace SmartBulkCopy
             var v = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version.ToString();
 
             _logger.Info($"SmartBulkCopy engine v. {v}");
+
+            switch (config.type)
+            {
+                case SmartBulkCopyConfiguration.CopyType.ServerSidePull:
+                    this.CopyPartition = SmartBulkCopy.StartServerSideLinkedServerPull;
+                    break;
+                case SmartBulkCopyConfiguration.CopyType.ServerSidePush:
+                    this.CopyPartition = SmartBulkCopy.StartServerSideLinkedServerPush;
+                    break;
+                default:
+                    break;
+            }
         }
 
         public async Task<int> Copy()
@@ -124,6 +136,23 @@ namespace SmartBulkCopy
                 _logger.Warn("WARNING! It is recommended to enable 'safe-check' option by setting it to 'readonly' or 'snapshot'.");
                 _logger.Warn("WARNING! Make sure data in source database is not changed during bulk copy process to avoid inconsistencies.");
             }
+
+            switch (_config.type)
+            {
+                case SmartBulkCopyConfiguration.CopyType.ServerSidePull:
+                    _logger.Info("Source server writes data using linked server...");
+                    this.InitLinkedServer(_config.DestinationConnectionString, _config.LinkedServer, _config.SourceConnectionString);
+                    break;
+                case SmartBulkCopyConfiguration.CopyType.ServerSidePush:
+                    this.InitLinkedServer(_config.SourceConnectionString, _config.LinkedServer, _config.DestinationConnectionString);
+                    _logger.Info("Destination server reads data using linked server...");
+                    break;
+                default:
+                    _logger.Info("Client-side copy...");
+                    break;
+            }
+            
+
 
             _logger.Info("Initializing copy process...");
 
@@ -248,6 +277,22 @@ namespace SmartBulkCopy
             _logger.Info("Done in {0:#.00} secs.", (double)_stopwatch.ElapsedMilliseconds / 1000.0);
 
             return result;
+        }
+
+        private void InitLinkedServer(string connectionString, string linkedServer, string destinationConnectionString)
+        {
+            // In the perfect world it would be good to automatically create linked server
+            // However, we would need to have many options in config like product type, provider name to create linked server.
+            // Currently, just check is it there.
+            try { 
+                var conn = new SqlConnection(connectionString);
+                _logger.Info($"Testing Linked Server {linkedServer}...");
+                var answer = conn.ExecuteScalar<int>($"EXEC('SELECT 42') AT [{linkedServer}];");
+                _logger.Info($"linked server replied the answer: {answer}");
+            } catch (Exception ex) {
+                throw new NotImplementedException($"Linked server {linkedServer} cannot connect!", ex);
+            }
+
         }
 
         private bool CheckTableSize(string tableName)
@@ -450,43 +495,28 @@ namespace SmartBulkCopy
 
                 while (_queue.TryDequeue(out copyInfo))
                 {
-                    if (copyInfo is NoPartitionsCopyInfo) 
+                    if (copyInfo is NoPartitionsCopyInfo)
                         _logger.Info($"Task {taskId}: Processing table {copyInfo.TableName}");
-                    else 
-                        _logger.Info($"Task {taskId}: Processing table {copyInfo.TableName} partition {copyInfo.PartitionNumber}...");                                     
+                    else
+                        _logger.Info($"Task {taskId}: Processing table {copyInfo.TableName} partition {copyInfo.PartitionNumber}...");
 
                     _activeTasks.AddOrUpdate(taskId.ToString(), copyInfo.TableName, (_1, _2) => { return copyInfo.TableName; });
-                    
-                    var sourceConnection = new SqlConnection(_config.SourceConnectionString);
+
                     var whereClause = string.Empty;
                     var predicate = copyInfo.GetPredicate();
-                    if (!string.IsNullOrEmpty(predicate)) {
+                    if (!string.IsNullOrEmpty(predicate))
+                    {
                         whereClause = $" WHERE {predicate}";
                     };
                     var sql = $"SELECT * FROM {copyInfo.TableName}{whereClause}";
 
-                    _logger.Debug($"Task {taskId}: Executing: {sql}");                    
-                    var sourceReader = sourceConnection.ExecuteReader(sql, commandTimeout: 0);                    
+                    _logger.Debug($"Task {taskId}: Executing: {sql}");
 
-                    using (var bulkCopy = new SqlBulkCopy(_config.DestinationConnectionString + $";Application Name=smartbulkcopy{taskId}", SqlBulkCopyOptions.TableLock))
-                    {
-                        bulkCopy.BulkCopyTimeout = 0;
-                        bulkCopy.BatchSize = _config.BatchSize;
-                        bulkCopy.DestinationTableName = copyInfo.TableName;
+                    CopyPartition(_config, taskId, copyInfo, sql, _logger);
 
-                        try
-                        {
-                            bulkCopy.WriteToServer(sourceReader);
-                        }
-                        finally
-                        {
-                            sourceReader.Close();
-                        }
-                    }
-
-                    if (copyInfo is NoPartitionsCopyInfo)                         
+                    if (copyInfo is NoPartitionsCopyInfo)
                         _logger.Info($"Task {taskId}: Table {copyInfo.TableName} copied.");
-                    else 
+                    else
                         _logger.Info($"Task {taskId}: Table {copyInfo.TableName}, partition {copyInfo.PartitionNumber} copied.");
                 }
 
@@ -509,6 +539,51 @@ namespace SmartBulkCopy
                 _activeTasks.Remove(taskId.ToString(), out dummy);
                 Interlocked.Add(ref _runningTasks, -1);
             }            
+        }
+
+        Action<SmartBulkCopyConfiguration, int, CopyInfo, string, ILogger> CopyPartition = StartClientSideBulkCopy;
+
+        private static void StartClientSideBulkCopy(SmartBulkCopyConfiguration _config, int taskId, CopyInfo copyInfo, string sql, ILogger logger)
+        {
+            var sourceConnection = new SqlConnection(_config.SourceConnectionString);
+            var sourceReader = sourceConnection.ExecuteReader(sql, commandTimeout: 0);
+
+            using (var bulkCopy = new SqlBulkCopy(_config.DestinationConnectionString + $";Application Name=smartbulkcopy{taskId}", SqlBulkCopyOptions.TableLock))
+            {
+                bulkCopy.BulkCopyTimeout = 0;
+                bulkCopy.BatchSize = _config.BatchSize;
+                bulkCopy.DestinationTableName = copyInfo.TableName;
+
+                try
+                {
+                    logger.Info($"Migrating table: {copyInfo.TableName}, partition: {copyInfo.PartitionNumber} using BulkCopy.");
+                    bulkCopy.WriteToServer(sourceReader);
+                }
+                finally
+                {
+                    sourceReader.Close();
+                }
+            }
+        }
+
+        private static void StartServerSideLinkedServerPush(SmartBulkCopyConfiguration _config, int taskId, CopyInfo copyInfo, string sql, ILogger logger)
+        {
+            var sourceConnection = new SqlConnection(_config.SourceConnectionString);
+
+            var serverSideSql = $"with src as ( {sql} ) insert into [{_config.LinkedServer}].{_config.DestinationDatabase}.{copyInfo.TableName};";
+
+            logger.Info($"Migrating table: {copyInfo.TableName}, partition: {copyInfo.PartitionNumber} using LinkedServer on source.");
+            sourceConnection.Execute(serverSideSql, commandTimeout: 0);
+        }
+
+        private static void StartServerSideLinkedServerPull(SmartBulkCopyConfiguration _config, int taskId, CopyInfo copyInfo, string sql, ILogger logger)
+        {
+            var destConnection = new SqlConnection(_config.DestinationConnectionString);
+
+            var serverSideSql = $"INSERT INTO {copyInfo.TableName}  EXEC( '{sql}' ) AT [{_config.LinkedServer}];";
+
+            logger.Info($"Migrating table: {copyInfo.TableName}, partition: {copyInfo.PartitionNumber} using Linked Server from destination.");
+            destConnection.Execute(serverSideSql, commandTimeout: 0);
         }
 
         private void MonitorCopyProcess()
@@ -564,7 +639,7 @@ namespace SmartBulkCopy
                 if (sku != "None") {
                     _logger.Info($"Database {builder.DataSource}/{builder.InitialCatalog} is a {sku}.");
                 } else {
-                    _logger.Info($"Database {builder.DataSource}/{builder.InitialCatalog} is a VM/On-Prem.");
+                    _logger.Info($"Database {builder.DataSource}/{builder.InitialCatalog} is a VM/On-Prem/Managed Instance.");
                 }
             }
             catch (Exception ex)
